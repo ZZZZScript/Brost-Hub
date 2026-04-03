@@ -1,1 +1,1812 @@
-# Brost-Hub
+-- ========== REHUB - COMPLETE WITH ALL FEATURES ========== --
+-- ========== DISCORD.GG/REHUB ========== --
+
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+local CoreGui = game:GetService("CoreGui")
+
+-- GUARANTEED UI PARENT (CORRIGIDO)
+local gui_parent = CoreGui
+pcall(function()
+    -- Tenta usar gethui se disponível (mais seguro)
+    if gethui then
+        gui_parent = gethui()
+    end
+end)
+
+-- Limpar elementos antigos
+pcall(function()
+    local old = gui_parent:FindFirstChild("REHUB_MAIN")
+    if old then old:Destroy() end
+    local oldFloatBtn = gui_parent:FindFirstChild("LeaveFloatingButton")
+    if oldFloatBtn then oldFloatBtn:Destroy() end
+end)
+
+-- ============================================
+-- AUTO STEAL CONFIG
+-- ============================================
+local AUTO_STEAL_CONFIG = {
+    AUTO_STEAL_NEAREST_ENABLED = false
+}
+
+local S = {
+    Players = game:GetService("Players"),
+    ReplicatedStorage = game:GetService("ReplicatedStorage"),
+    RunService = game:GetService("RunService"),
+    UserInputService = game:GetService("UserInputService")
+}
+
+local Packages = S.ReplicatedStorage:WaitForChild("Packages")
+local Datas = S.ReplicatedStorage:WaitForChild("Datas")
+local Shared = S.ReplicatedStorage:WaitForChild("Shared")
+local Utils = S.ReplicatedStorage:WaitForChild("Utils")
+
+local Synchronizer = require(Packages:WaitForChild("Synchronizer"))
+local AnimalsData = require(Datas:WaitForChild("Animals"))
+local AnimalsShared = require(Shared:WaitForChild("Animals"))
+
+S.LocalPlayer = S.Players.LocalPlayer
+
+local allAnimalsCache = {}
+local PromptMemoryCache = {}
+local InternalStealCache = {}
+local stealConnection = nil
+local AUTO_STEAL_PROX_RADIUS = 20
+
+local function isMyBaseAnimal(animalData)
+    if not animalData or not animalData.plot then return false end
+    
+    local plots = workspace:FindFirstChild("Plots")
+    if not plots then return false end
+    
+    local plot = plots:FindFirstChild(animalData.plot)
+    if not plot then return false end
+    
+    local channel = Synchronizer:Get(plot.Name)
+    if channel then
+        local owner = channel:Get("Owner")
+        if owner then
+            if typeof(owner) == "Instance" and owner:IsA("Player") then
+                return owner.UserId == S.LocalPlayer.UserId
+            elseif typeof(owner) == "table" and owner.UserId then
+                return owner.UserId == S.LocalPlayer.UserId
+            elseif typeof(owner) == "Instance" then
+                return owner == S.LocalPlayer
+            end
+        end
+    end
+    
+    local sign = plot:FindFirstChild("PlotSign")
+    if sign then
+        local yourBase = sign:FindFirstChild("YourBase")
+        if yourBase and yourBase:IsA("BillboardGui") then
+            return yourBase.Enabled == true
+        end
+    end
+    
+    return false
+end
+
+local function findProximityPromptForAnimal(animalData)
+    if not animalData then return nil end
+    
+    local cachedPrompt = PromptMemoryCache[animalData.uid]
+    if cachedPrompt and cachedPrompt.Parent then
+        return cachedPrompt
+    end
+    
+    local plot = workspace.Plots:FindFirstChild(animalData.plot)
+    if not plot then return nil end
+    
+    local podiums = plot:FindFirstChild("AnimalPodiums")
+    if not podiums then return nil end
+    
+    local podium = podiums:FindFirstChild(animalData.slot)
+    if not podium then return nil end
+    
+    local base = podium:FindFirstChild("Base")
+    if not base then return nil end
+    
+    local spawn = base:FindFirstChild("Spawn")
+    if not spawn then return nil end
+    
+    local attach = spawn:FindFirstChild("PromptAttachment")
+    if not attach then return nil end
+    
+    for _, p in ipairs(attach:GetChildren()) do
+        if p:IsA("ProximityPrompt") then
+            PromptMemoryCache[animalData.uid] = p
+            return p
+        end
+    end
+    
+    return nil
+end
+
+local function getAnimalPosition(animalData)
+    local plot = workspace.Plots:FindFirstChild(animalData.plot)
+    if not plot then return nil end
+    
+    local podiums = plot:FindFirstChild("AnimalPodiums")
+    if not podiums then return nil end
+    
+    local podium = podiums:FindFirstChild(animalData.slot)
+    if not podium then return nil end
+    
+    return podium:GetPivot().Position
+end
+
+local function getNearestAnimal()
+    local character = S.LocalPlayer.Character
+    if not character then return nil end
+    
+    local hrp = character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("UpperTorso")
+    if not hrp then return nil end
+    
+    local nearest = nil
+    local minDist = math.huge
+    
+    for _, animalData in ipairs(allAnimalsCache) do
+        if isMyBaseAnimal(animalData) then
+            -- skip
+        else
+            local pos = getAnimalPosition(animalData)
+            if pos then
+                local dist = (hrp.Position - pos).Magnitude
+                if dist < minDist then
+                    minDist = dist
+                    nearest = animalData
+                end
+            end
+        end
+    end
+    
+    return nearest
+end
+
+local function buildStealCallbacks(prompt)
+    if InternalStealCache[prompt] then return end
+    
+    local data = {
+        holdCallbacks = {},
+        triggerCallbacks = {},
+        ready = true,
+    }
+    
+    local ok1, conns1 = pcall(getconnections, prompt.PromptButtonHoldBegan)
+    if ok1 and type(conns1) == "table" then
+        for _, conn in ipairs(conns1) do
+            if type(conn.Function) == "function" then
+                table.insert(data.holdCallbacks, conn.Function)
+            end
+        end
+    end
+    
+    local ok2, conns2 = pcall(getconnections, prompt.Triggered)
+    if ok2 and type(conns2) == "table" then
+        for _, conn in ipairs(conns2) do
+            if type(conn.Function) == "function" then
+                table.insert(data.triggerCallbacks, conn.Function)
+            end
+        end
+    end
+    
+    if (#data.holdCallbacks > 0) or (#data.triggerCallbacks > 0) then
+        InternalStealCache[prompt] = data
+    end
+end
+
+local function executeInternalStealAsync(prompt)
+    local data = InternalStealCache[prompt]
+    if not data or not data.ready then return false end
+    
+    data.ready = false
+    
+    task.spawn(function()
+        if #data.holdCallbacks > 0 then
+            for _, fn in ipairs(data.holdCallbacks) do
+                task.spawn(fn)
+            end
+        end
+        
+        task.wait(1.3)
+        
+        if #data.triggerCallbacks > 0 then
+            for _, fn in ipairs(data.triggerCallbacks) do
+                task.spawn(fn)
+            end
+        end
+        
+        task.wait(0.1)
+        data.ready = true
+    end)
+    
+    return true
+end
+
+local function attemptSteal(prompt)
+    if not prompt or not prompt.Parent then
+        return false
+    end
+    
+    buildStealCallbacks(prompt)
+    if not InternalStealCache[prompt] then
+        return false
+    end
+    
+    return executeInternalStealAsync(prompt)
+end
+
+local function scanAllPlots()
+    local plots = workspace:FindFirstChild("Plots")
+    if not plots then return {} end
+    
+    local newCache = {}
+    
+    for _, plot in ipairs(plots:GetChildren()) do
+        local channel = Synchronizer:Get(plot.Name)
+        if not channel then continue end
+        
+        local animalList = channel:Get("AnimalList")
+        if not animalList then continue end
+        
+        local owner = channel:Get("Owner")
+        if not owner then continue end
+        
+        local ownerName = "Unknown"
+        if typeof(owner) == "Instance" and owner:IsA("Player") then
+            ownerName = owner.Name
+        elseif typeof(owner) == "table" and owner.Name then
+            ownerName = owner.Name
+        end
+        
+        for slot, animalData in pairs(animalList) do
+            if type(animalData) == "table" then
+                local animalName = animalData.Index
+                local animalInfo = AnimalsData[animalName]
+                if not animalInfo then continue end
+                
+                local genValue = AnimalsShared:GetGeneration(animalName, animalData.Mutation, animalData.Traits, nil)
+                
+                table.insert(newCache, {
+                    name = animalInfo.DisplayName or animalName,
+                    genValue = genValue,
+                    owner = ownerName,
+                    plot = plot.Name,
+                    slot = tostring(slot),
+                    uid = plot.Name .. "_" .. tostring(slot),
+                })
+            end
+        end
+    end
+    
+    allAnimalsCache = newCache
+    
+    table.sort(allAnimalsCache, function(a, b)
+        return a.genValue > b.genValue
+    end)
+    
+    return #allAnimalsCache
+end
+
+local function startAutoSteal()
+    if stealConnection then return end
+    
+    stealConnection = S.RunService.Heartbeat:Connect(function()
+        if not AUTO_STEAL_CONFIG.AUTO_STEAL_NEAREST_ENABLED then return end
+        
+        local targetAnimal = getNearestAnimal()
+        if not targetAnimal then return end
+        
+        local character = S.LocalPlayer.Character
+        if not character then return end
+        
+        local hrp = character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("UpperTorso")
+        if not hrp then return end
+        
+        local animalPos = getAnimalPosition(targetAnimal)
+        if not animalPos then return end
+        
+        local dist = (hrp.Position - animalPos).Magnitude
+        if dist > AUTO_STEAL_PROX_RADIUS then return end
+        
+        local prompt = PromptMemoryCache[targetAnimal.uid]
+        if not prompt or not prompt.Parent then
+            prompt = findProximityPromptForAnimal(targetAnimal)
+        end
+        
+        if prompt then
+            attemptSteal(prompt)
+        end
+    end)
+end
+
+local function stopAutoSteal()
+    if not stealConnection then return end
+    stealConnection:Disconnect()
+    stealConnection = nil
+end
+
+-- Start plot scanner
+task.spawn(function()
+    while task.wait(5) do
+        pcall(scanAllPlots)
+    end
+end)
+
+-- ============================================
+-- STEAL COMMANDS SEQUENCE
+-- ============================================
+local stealCommands = {"w", "l", "i", "j", "k", "n"}
+local function executeStealSequence(targetPlayer)
+    if not targetPlayer then return end
+    
+    local targetChar = targetPlayer.Character
+    if not targetChar then return end
+    
+    local targetHRP = targetChar:FindFirstChild("HumanoidRootPart")
+    if not targetHRP then return end
+    
+    local myChar = LocalPlayer.Character
+    if not myChar then return end
+    
+    local myHRP = myChar:FindFirstChild("HumanoidRootPart")
+    if not myHRP then return end
+    
+    for _, cmd in ipairs(stealCommands) do
+        print("Executed: " .. cmd)
+        task.wait(0.1)
+    end
+    
+    myHRP.CFrame = targetHRP.CFrame + Vector3.new(0, 2, 0)
+end
+
+local function getClosestPlayer()
+    local myChar = LocalPlayer.Character
+    if not myChar then return nil end
+    
+    local myHRP = myChar:FindFirstChild("HumanoidRootPart")
+    if not myHRP then return nil end
+    
+    local closest = nil
+    local closestDist = math.huge
+    
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local char = player.Character
+            if char then
+                local hrp = char:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    local dist = (hrp.Position - myHRP.Position).Magnitude
+                    if dist < closestDist then
+                        closestDist = dist
+                        closest = player
+                    end
+                end
+            end
+        end
+    end
+    
+    return closest
+end
+
+-- ============================================
+-- FLOAT FUNCTION
+-- ============================================
+local FLOAT_ENABLED = false
+local floatConnections = {}
+local floatBodyVelocity = nil
+local floatPart = nil
+
+local function enableFloat(character)
+    if FLOAT_ENABLED then return end
+    
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local rootPart = character:FindFirstChild("HumanoidRootPart")
+    if not humanoid or not rootPart then return end
+    
+    FLOAT_ENABLED = true
+    
+    floatPart = Instance.new("Part")
+    floatPart.Size = Vector3.new(4, 1, 4)
+    floatPart.Transparency = 1
+    floatPart.Anchored = false
+    floatPart.CanCollide = false
+    floatPart.Massless = true
+    floatPart.Parent = workspace
+    
+    local weld = Instance.new("Weld")
+    weld.Part0 = rootPart
+    weld.Part1 = floatPart
+    weld.C0 = CFrame.new(0, -3.5, 0)
+    weld.Parent = floatPart
+    
+    floatBodyVelocity = Instance.new("BodyVelocity")
+    floatBodyVelocity.MaxForce = Vector3.new(0, 5000, 0)
+    floatBodyVelocity.Velocity = Vector3.new(0, 0, 0)
+    floatBodyVelocity.P = 1000
+    floatBodyVelocity.Parent = floatPart
+    
+    floatConnections.stepped = RunService.Stepped:Connect(function()
+        if not FLOAT_ENABLED or not humanoid or humanoid.Health <= 0 then
+            return
+        end
+        
+        local isInAir = humanoid:GetState() == Enum.HumanoidStateType.Freefall
+        local isJumping = humanoid:GetState() == Enum.HumanoidStateType.Jumping
+        local isFalling = humanoid:GetState() == Enum.HumanoidStateType.FallingDown
+        
+        local raycast = workspace:Raycast(rootPart.Position, Vector3.new(0, -10, 0))
+        local isOnGround = raycast ~= nil
+        
+        if isInAir or isJumping or isFalling or not isOnGround then
+            floatBodyVelocity.Velocity = Vector3.new(0, -2.5, 0)
+        else
+            floatBodyVelocity.Velocity = Vector3.new(0, 0, 0)
+        end
+    end)
+    
+    floatConnections.died = humanoid.Died:Connect(function()
+        disableFloat()
+    end)
+end
+
+local function disableFloat()
+    FLOAT_ENABLED = false
+    for _, conn in pairs(floatConnections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    floatConnections = {}
+    
+    if floatPart then
+        floatPart:Destroy()
+        floatPart = nil
+    end
+end
+
+-- ============================================
+-- HEIGHT BYPASS FUNCTION
+-- ============================================
+local HEIGHT_BYPASS_ENABLED = false
+local heightBypassThread = nil
+
+local function enableHeightBypass()
+    if HEIGHT_BYPASS_ENABLED then return end
+    HEIGHT_BYPASS_ENABLED = true
+    
+    heightBypassThread = task.spawn(function()
+        while HEIGHT_BYPASS_ENABLED do
+            local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                hrp.Size = Vector3.new(2, 20, 1)
+                task.wait(0.2)
+                if not HEIGHT_BYPASS_ENABLED then break end
+                hrp.Size = Vector3.new(2, 40, 1)
+                task.wait(2.1)
+                if not HEIGHT_BYPASS_ENABLED then break end
+                hrp.Size = Vector3.new(2, 2, 1)
+                task.wait(1.5)
+            else
+                task.wait(0.1)
+            end
+        end
+        local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if hrp then hrp.Size = Vector3.new(2, 2, 1) end
+        heightBypassThread = nil
+    end)
+end
+
+local function disableHeightBypass()
+    HEIGHT_BYPASS_ENABLED = false
+    if heightBypassThread then
+        task.cancel(heightBypassThread)
+        heightBypassThread = nil
+    end
+    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if hrp then hrp.Size = Vector3.new(2, 2, 1) end
+end
+
+-- ============================================
+-- TALL LIKE ZZZZ FUNCTION
+-- ============================================
+local TALL_MODE_ENABLED = false
+
+local function enableTallMode()
+    if TALL_MODE_ENABLED then return end
+    TALL_MODE_ENABLED = true
+    
+    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        hrp.Size = Vector3.new(2, 10, 1)
+    end
+end
+
+local function disableTallMode()
+    TALL_MODE_ENABLED = false
+    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        hrp.Size = Vector3.new(2, 2, 1)
+    end
+end
+
+-- ============================================
+-- GRAPPLE FLIGHT FUNCTION
+-- ============================================
+local GRAPPLE_FLIGHT_ENABLED = false
+local grappleFlightConnection = nil
+local grappleTool = nil
+local grappleFlightPart = nil
+
+local function getGrappleHook()
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    if not backpack then return nil end
+    
+    grappleTool = backpack:FindFirstChild("Grapple Hook") or backpack:FindFirstChild("GrappleHook")
+    if not grappleTool then
+        grappleTool = workspace:FindFirstChild("Grapple Hook") or workspace:FindFirstChild("GrappleHook")
+        if grappleTool and grappleTool:IsA("Tool") then
+            grappleTool.Parent = backpack
+        end
+    end
+    return grappleTool
+end
+
+local function equipGrappleHook()
+    if not getGrappleHook() then return false end
+    local char = LocalPlayer.Character
+    if not char then return false end
+    
+    local equipped = char:FindFirstChild("Grapple Hook") or char:FindFirstChild("GrappleHook")
+    if equipped then
+        grappleTool = equipped
+        return true
+    end
+    
+    if grappleTool then
+        grappleTool.Parent = char
+        return true
+    end
+    return false
+end
+
+local function enableGrappleFlight()
+    if GRAPPLE_FLIGHT_ENABLED then return end
+    
+    if not equipGrappleHook() then
+        warn("[REHUB] No Grapple Hook found!")
+        return
+    end
+    
+    GRAPPLE_FLIGHT_ENABLED = true
+    
+    local char = LocalPlayer.Character
+    if not char then return end
+    
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not hum or not root then return end
+    
+    grappleFlightPart = Instance.new("Part")
+    grappleFlightPart.Size = Vector3.new(2, 1, 2)
+    grappleFlightPart.Transparency = 1
+    grappleFlightPart.Anchored = false
+    grappleFlightPart.CanCollide = false
+    grappleFlightPart.Massless = true
+    grappleFlightPart.Parent = workspace
+    
+    local weld = Instance.new("Weld")
+    weld.Part0 = root
+    weld.Part1 = grappleFlightPart
+    weld.C0 = CFrame.new(0, 0, 0)
+    weld.Parent = grappleFlightPart
+    
+    local spd = 150
+    local bodyVel = nil
+    
+    grappleFlightConnection = RunService.Heartbeat:Connect(function()
+        local char = LocalPlayer.Character
+        if not char then return end
+        
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if not hum or not root then return end
+        
+        pcall(function()
+            local packages = ReplicatedStorage:FindFirstChild("Packages")
+            if packages then
+                local net = packages:FindFirstChild("Net")
+                if net then
+                    local remoteEvent = net:FindFirstChild("RE/UseItem")
+                    if remoteEvent then
+                        remoteEvent:FireServer(0.1)
+                    end
+                end
+            end
+        end)
+        
+        if not bodyVel or not bodyVel.Parent then
+            bodyVel = Instance.new("BodyVelocity")
+            bodyVel.Name = "FlyVel"
+            bodyVel.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+            bodyVel.P = 2000
+            bodyVel.Parent = grappleFlightPart
+        end
+        
+        local dir = Vector3.new(0, 0, 0)
+        
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+            dir = dir + workspace.CurrentCamera.CFrame.LookVector * spd
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then
+            dir = dir - workspace.CurrentCamera.CFrame.LookVector * spd
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+            dir = dir - workspace.CurrentCamera.CFrame.RightVector * spd
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+            dir = dir + workspace.CurrentCamera.CFrame.RightVector * spd
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+            dir = dir + Vector3.new(0, spd, 0)
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then
+            dir = dir - Vector3.new(0, spd, 0)
+        end
+        
+        bodyVel.Velocity = dir
+        hum:ChangeState(Enum.HumanoidStateType.Physics)
+    end)
+end
+
+local function disableGrappleFlight()
+    if not GRAPPLE_FLIGHT_ENABLED then return end
+    GRAPPLE_FLIGHT_ENABLED = false
+    
+    if grappleFlightConnection then
+        grappleFlightConnection:Disconnect()
+        grappleFlightConnection = nil
+    end
+    
+    if grappleFlightPart then
+        grappleFlightPart:Destroy()
+        grappleFlightPart = nil
+    end
+    
+    local char = LocalPlayer.Character
+    if char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum:ChangeState(Enum.HumanoidStateType.Running)
+        end
+        
+        local equippedGrapple = char:FindFirstChild("Grapple Hook") or char:FindFirstChild("GrappleHook")
+        if equippedGrapple and equippedGrapple:IsA("Tool") then
+            equippedGrapple.Parent = LocalPlayer:FindFirstChild("Backpack")
+        end
+    end
+end
+
+-- ============================================
+-- INFINITE JUMP FUNCTION
+-- ============================================
+local INFINITE_JUMP_ENABLED = false
+local infiniteJumpConnection = nil
+local lastJumpTime = 0
+local JUMP_COOLDOWN = 0.2
+
+local function doInfiniteJump()
+    local char = LocalPlayer.Character
+    if not char then return end
+    
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+    
+    if tick() - lastJumpTime < JUMP_COOLDOWN then return end
+    lastJumpTime = tick()
+    
+    humanoid.Jump = true
+    
+    task.delay(0.1, function()
+        if humanoid then humanoid.Jump = false end
+    end)
+end
+
+local function enableInfiniteJump()
+    if INFINITE_JUMP_ENABLED then return end
+    INFINITE_JUMP_ENABLED = true
+    
+    infiniteJumpConnection = RunService.Heartbeat:Connect(function()
+        local char = LocalPlayer.Character
+        if not char then return end
+        
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
+        if not humanoid then return end
+        
+        local isJumping = false
+        
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+            isJumping = true
+        end
+        
+        if humanoid:GetState() == Enum.HumanoidStateType.Jumping then
+            isJumping = true
+        end
+        
+        if humanoid.Jump then
+            isJumping = true
+        end
+        
+        if isJumping then
+            doInfiniteJump()
+        end
+    end)
+end
+
+local function disableInfiniteJump()
+    if not INFINITE_JUMP_ENABLED then return end
+    INFINITE_JUMP_ENABLED = false
+    
+    if infiniteJumpConnection then
+        infiniteJumpConnection:Disconnect()
+        infiniteJumpConnection = nil
+    end
+end
+
+-- ============================================
+-- PLATFORM FUNCTION
+-- ============================================
+local PLATFORM_ENABLED = false
+local platform = nil
+local platformConnection = nil
+local isRising = false
+
+local function destroyPlatform()
+    if platform then
+        platform:Destroy()
+        platform = nil
+    end
+    PLATFORM_ENABLED = false
+    isRising = false
+    if platformConnection then
+        platformConnection:Disconnect()
+        platformConnection = nil
+    end
+end
+
+local function canRise()
+    if not platform then return false end
+    local origin = platform.Position + Vector3.new(0, platform.Size.Y/2, 0)
+    local direction = Vector3.new(0, 2, 0)
+    local rayParams = RaycastParams.new()
+    rayParams.FilterDescendantsInstances = {platform, LocalPlayer.Character}
+    rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+    return not workspace:Raycast(origin, direction, rayParams)
+end
+
+local function enablePlatform(character)
+    if PLATFORM_ENABLED then return end
+    
+    local rootPart = character:FindFirstChild("HumanoidRootPart")
+    if not rootPart then return end
+    
+    PLATFORM_ENABLED = true
+    
+    platform = Instance.new("Part")
+    platform.Size = Vector3.new(6, 0.5, 6)
+    platform.Anchored = true
+    platform.CanCollide = true
+    platform.Transparency = 0.3
+    platform.Material = Enum.Material.Neon
+    platform.Color = Color3.fromRGB(100, 200, 255)
+    platform.Position = rootPart.Position - Vector3.new(0, rootPart.Size.Y/2 + platform.Size.Y/2, 0)
+    platform.Parent = workspace
+    
+    isRising = true
+    platformConnection = RunService.Heartbeat:Connect(function(dt)
+        if platform and PLATFORM_ENABLED then
+            local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if root then
+                local newXZ = Vector3.new(root.Position.X, platform.Position.Y, root.Position.Z)
+                if isRising and canRise() then
+                    platform.Position = newXZ + Vector3.new(0, dt * 5, 0)
+                else
+                    isRising = false
+                    platform.Position = newXZ
+                end
+            end
+        end
+    end)
+    
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        humanoid.Died:Connect(destroyPlatform)
+    end
+end
+
+local function disablePlatform()
+    destroyPlatform()
+end
+
+-- ============================================
+-- HELICOPTER FUNCTION
+-- ============================================
+local HELICOPTER_ENABLED = false
+local helicopterConnections = {}
+local helicopterBodyAngularVelocity = nil
+
+local function enableHelicopter(character)
+    if HELICOPTER_ENABLED then return end
+    
+    local rootPart = character:FindFirstChild("HumanoidRootPart")
+    if not rootPart then return end
+    
+    HELICOPTER_ENABLED = true
+    
+    helicopterBodyAngularVelocity = Instance.new("BodyAngularVelocity")
+    helicopterBodyAngularVelocity.MaxTorque = Vector3.new(0, math.huge, 0)
+    helicopterBodyAngularVelocity.AngularVelocity = Vector3.new(0, 20, 0)
+    helicopterBodyAngularVelocity.Parent = rootPart
+    
+    helicopterConnections.helicopter = RunService.Heartbeat:Connect(function()
+        if not HELICOPTER_ENABLED then return end
+        
+        local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if not root then return end
+        
+        for _, otherPlayer in ipairs(Players:GetPlayers()) do
+            if otherPlayer ~= LocalPlayer and otherPlayer.Character then
+                local otherRoot = otherPlayer.Character:FindFirstChild("HumanoidRootPart")
+                if otherRoot then
+                    local distance = (otherRoot.Position - root.Position).Magnitude
+                    if distance < 8 then
+                        local direction = (otherRoot.Position - root.Position).Unit
+                        otherRoot.AssemblyLinearVelocity = direction * 100 + Vector3.new(0, 50, 0)
+                    end
+                end
+            end
+        end
+    end)
+    
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        helicopterConnections.died = humanoid.Died:Connect(function()
+            disableHelicopter()
+        end)
+    end
+end
+
+local function disableHelicopter()
+    if not HELICOPTER_ENABLED then return end
+    HELICOPTER_ENABLED = false
+    
+    for _, conn in pairs(helicopterConnections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    helicopterConnections = {}
+    
+    if helicopterBodyAngularVelocity then
+        helicopterBodyAngularVelocity:Destroy()
+        helicopterBodyAngularVelocity = nil
+    end
+end
+
+-- ============================================
+-- FLOAT TO PLOT FUNCTION
+-- ============================================
+local floatToPlotActive = false
+local floatToPlotConnection = nil
+
+local function findNearestPlot()
+    local myChar = LocalPlayer.Character
+    if not myChar then return nil end
+    
+    local myHRP = myChar:FindFirstChild("HumanoidRootPart")
+    if not myHRP then return nil end
+    
+    local plotsFolder = Workspace:FindFirstChild("Plots")
+    if not plotsFolder then return nil end
+    
+    local nearestPlot = nil
+    local nearestDistance = 500
+    
+    for _, plot in ipairs(plotsFolder:GetChildren()) do
+        if plot:IsA("Model") then
+            local plotPosition = plot:GetPivot().Position
+            local distance = (myHRP.Position - plotPosition).Magnitude
+            
+            if distance < nearestDistance then
+                nearestDistance = distance
+                nearestPlot = plot
+            end
+        end
+    end
+    
+    return nearestPlot, nearestDistance
+end
+
+local function enableFloatToPlot()
+    if floatToPlotActive then return end
+    floatToPlotActive = true
+    
+    floatToPlotConnection = RunService.Heartbeat:Connect(function()
+        if not floatToPlotActive then return end
+        
+        local myChar = LocalPlayer.Character
+        if not myChar then return end
+        
+        local myHRP = myChar:FindFirstChild("HumanoidRootPart")
+        if not myHRP then return end
+        
+        local targetPlot, distance = findNearestPlot()
+        if targetPlot and distance > 5 then
+            local plotPosition = targetPlot:GetPivot().Position
+            local direction = (plotPosition - myHRP.Position).Unit
+            local speed = 50
+            
+            myHRP.AssemblyLinearVelocity = Vector3.new(
+                direction.X * speed,
+                myHRP.AssemblyLinearVelocity.Y,
+                direction.Z * speed
+            )
+        end
+    end)
+end
+
+local function disableFloatToPlot()
+    floatToPlotActive = false
+    if floatToPlotConnection then
+        floatToPlotConnection:Disconnect()
+        floatToPlotConnection = nil
+    end
+end
+
+-- ============================================
+-- FREEZE FUNCTION
+-- ============================================
+local freezeActive = false
+local freezeConnection = nil
+local freezeWeld = nil
+local freezeGround = nil
+local freezeBodyPos = nil
+
+local function enableFreeze()
+    if freezeActive then return end
+    
+    local myChar = LocalPlayer.Character
+    if not myChar then return end
+    
+    local myHRP = myChar:FindFirstChild("HumanoidRootPart")
+    if not myHRP then return end
+    
+    freezeActive = true
+    
+    local savedPos = myHRP.Position
+    local savedCF = myHRP.CFrame
+    
+    freezeGround = Instance.new("Part")
+    freezeGround.Name = "FreezeGround"
+    freezeGround.Size = Vector3.new(10, 1, 10)
+    freezeGround.Position = savedPos - Vector3.new(0, 3, 0)
+    freezeGround.Anchored = true
+    freezeGround.CanCollide = true
+    freezeGround.Transparency = 1
+    freezeGround.Parent = workspace
+    
+    freezeWeld = Instance.new("WeldConstraint")
+    freezeWeld.Part0 = myHRP
+    freezeWeld.Part1 = freezeGround
+    freezeWeld.Parent = myHRP
+    
+    freezeBodyPos = Instance.new("BodyPosition")
+    freezeBodyPos.Position = savedPos
+    freezeBodyPos.MaxForce = Vector3.new(4000, 4000, 4000)
+    freezeBodyPos.P = 2000
+    freezeBodyPos.Parent = myHRP
+    
+    freezeConnection = RunService.Heartbeat:Connect(function()
+        if not freezeActive or not myHRP or myHRP.Parent ~= myChar then
+            return
+        end
+        
+        myHRP.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        myHRP.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        
+        if freezeBodyPos then
+            freezeBodyPos.Position = savedPos
+        end
+        
+        pcall(function()
+            myHRP.CFrame = savedCF
+        end)
+    end)
+end
+
+local function disableFreeze()
+    freezeActive = false
+    
+    if freezeConnection then
+        freezeConnection:Disconnect()
+        freezeConnection = nil
+    end
+    
+    if freezeWeld then
+        freezeWeld:Destroy()
+        freezeWeld = nil
+    end
+    
+    if freezeGround then
+        freezeGround:Destroy()
+        freezeGround = nil
+    end
+    
+    if freezeBodyPos then
+        freezeBodyPos:Destroy()
+        freezeBodyPos = nil
+    end
+end
+
+-- ============================================
+-- DELETE BORDERS FUNCTION
+-- ============================================
+local function deleteBorders()
+    pcall(function()
+        local map = Workspace:FindFirstChild("Map")
+        if map then
+            local borders = map:FindFirstChild("Borders")
+            if borders then
+                borders:Destroy()
+                print("[REHUB] Borders deleted!")
+            end
+        end
+    end)
+end
+
+-- ============================================
+-- BARRIER INCREASE FUNCTION
+-- ============================================
+local function barrierIncrease()
+    pcall(function()
+        local map = Workspace:FindFirstChild("Map")
+        if map then
+            for _, child in ipairs(map:GetChildren()) do
+                if child:IsA("Part") and child.Name ~= "Base" then
+                    pcall(function() child.Size = Vector3.new(child.Size.X, child.Size.Y, 13) end)
+                end
+            end
+            local borders = map:FindFirstChild("Borders")
+            if borders then
+                for _, child in ipairs(borders:GetChildren()) do
+                    if child:IsA("Part") then
+                        pcall(function() child.Size = Vector3.new(child.Size.X, child.Size.Y, 13) end)
+                    end
+                end
+            end
+            print("[REHUB] Barrier increased!")
+        end
+    end)
+end
+
+-- ============================================
+-- INVIS CLONE FUNCTION
+-- ============================================
+local function RunInvisClone()
+    local character = LocalPlayer.Character
+    if not character then return end
+    local humanoid = character:FindFirstChild("Humanoid")
+    if not humanoid then return end
+    
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    if not backpack then return end
+    
+    local cloak = backpack:FindFirstChild("Invisibility Cloak")
+    local cloner = backpack:FindFirstChild("Quantum Cloner")
+    
+    if not cloak or not cloner then return end
+    
+    humanoid:UnequipTools()
+    task.wait(0.05)
+    humanoid:EquipTool(cloak)
+    task.wait(0.05)
+    cloak:Activate()
+    task.wait(1)
+    humanoid:EquipTool(cloner)
+    task.spawn(function() cloner:Activate() end)
+    task.wait(0.1)
+    task.spawn(function() cloner:Activate() end)
+    task.wait(0.1)
+    task.spawn(function() cloner:Activate() end)
+end
+
+-- ============================================
+-- FRIENDS TOGGLE FUNCTION
+-- ============================================
+local friendsAllowed = true
+local function ToggleFriends()
+    friendsAllowed = not friendsAllowed
+    print("[REHUB] Friends: " .. (friendsAllowed and "ALLOWED" or "DISALLOWED"))
+    return friendsAllowed
+end
+
+-- ============================================
+-- INSTANT LEAVE TOGGLE (COM BOTÃO FLUTUANTE - CORRIGIDO)
+-- ============================================
+local leaveEnabled = false
+local floatingLeaveButton = nil
+
+local function createFloatingLeaveButton()
+    -- Destroi botão antigo se existir
+    if floatingLeaveButton and floatingLeaveButton.Parent then
+        pcall(function() floatingLeaveButton:Destroy() end)
+        floatingLeaveButton = nil
+    end
+    
+    -- Cria um ScreenGui separado para o botão flutuante (garantia de visibilidade)
+    local floatingGui = Instance.new("ScreenGui")
+    floatingGui.Name = "LeaveFloatingGui"
+    floatingGui.ResetOnSpawn = false
+    floatingGui.DisplayOrder = 999999
+    floatingGui.Parent = gui_parent
+    
+    -- Garante que o GUI está visível
+    pcall(function()
+        if syn and syn.protect_gui then
+            syn.protect_gui(floatingGui)
+        end
+    end)
+    
+    floatingLeaveButton = Instance.new("TextButton")
+    floatingLeaveButton.Name = "LeaveFloatingButton"
+    floatingLeaveButton.Size = UDim2.new(0, 140, 0, 50)
+    floatingLeaveButton.Position = UDim2.new(0.5, -70, 0.85, 0)
+    floatingLeaveButton.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
+    floatingLeaveButton.Text = "🚪 INSTANT LEAVE"
+    floatingLeaveButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    floatingLeaveButton.TextSize = 14
+    floatingLeaveButton.Font = Enum.Font.GothamBold
+    floatingLeaveButton.AutoButtonColor = false
+    floatingLeaveButton.Parent = floatingGui
+    floatingLeaveButton.ZIndex = 999999
+    
+    -- Borda arredondada
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 10)
+    corner.Parent = floatingLeaveButton
+    
+    -- Borda branca
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(255, 255, 255)
+    stroke.Thickness = 2
+    stroke.Transparency = 0.2
+    stroke.Parent = floatingLeaveButton
+    
+    -- Sombra
+    local shadow = Instance.new("UIShadow")
+    shadow.Size = 5
+    shadow.Parent = floatingLeaveButton
+    
+    -- Efeito de pulsar (animação)
+    task.spawn(function()
+        while floatingLeaveButton and floatingLeaveButton.Parent and leaveEnabled do
+            for i = 1, 2 do
+                pcall(function()
+                    floatingLeaveButton.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
+                    stroke.Transparency = 0.2
+                end)
+                task.wait(0.3)
+                pcall(function()
+                    floatingLeaveButton.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
+                    stroke.Transparency = 0
+                end)
+                task.wait(0.3)
+            end
+        end
+    end)
+    
+    -- Dragging do botão flutuante
+    local dragging = false
+    local dragStart = nil
+    local startPos = nil
+    
+    floatingLeaveButton.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = floatingLeaveButton.Position
+            stroke.Transparency = 0
+        end
+    end)
+    
+    floatingLeaveButton.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            floatingLeaveButton.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+    
+    floatingLeaveButton.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+            stroke.Transparency = 0.2
+        end
+    end)
+    
+    -- Clique para sair
+    floatingLeaveButton.MouseButton1Click:Connect(function()
+        LocalPlayer:Kick("REHUB - Instant Leave")
+    end)
+    
+    floatingLeaveButton.TouchTap:Connect(function()
+        LocalPlayer:Kick("REHUB - Instant Leave")
+    end)
+    
+    print("[REHUB] ✅ Botão flutuante criado com sucesso!")
+end
+
+local function removeFloatingLeaveButton()
+    if floatingLeaveButton then
+        local parent = floatingLeaveButton.Parent
+        pcall(function() floatingLeaveButton:Destroy() end)
+        if parent and parent ~= gui_parent then
+            pcall(function() parent:Destroy() end)
+        end
+        floatingLeaveButton = nil
+    end
+    -- Limpa qualquer GUI residual
+    local existingGui = gui_parent:FindFirstChild("LeaveFloatingGui")
+    if existingGui then
+        pcall(function() existingGui:Destroy() end)
+    end
+end
+
+local function doInstantLeave()
+    LocalPlayer:Kick("REHUB - Instant Leave")
+end
+
+-- ============================================
+-- UI CREATION - MENU MENOR
+-- ============================================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "REHUB_MAIN"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.DisplayOrder = 9999
+ScreenGui.Parent = gui_parent
+
+-- Main Frame
+local Main = Instance.new("Frame", ScreenGui)
+Main.Size = UDim2.new(0, 280, 0, 380)
+Main.Position = UDim2.new(0.5, -140, 0.35, -190)
+Main.BackgroundColor3 = Color3.fromRGB(10, 10, 15)
+Main.BackgroundTransparency = 0.05
+Main.ClipsDescendants = true
+Main.Active = true
+Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 8)
+
+local mainStroke = Instance.new("UIStroke", Main)
+mainStroke.Color = Color3.fromRGB(0, 200, 255)
+mainStroke.Thickness = 2
+mainStroke.Transparency = 0.3
+
+-- Title Bar
+local TitleBar = Instance.new("Frame", Main)
+TitleBar.Size = UDim2.new(1, 0, 0, 35)
+TitleBar.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
+TitleBar.BorderSizePixel = 0
+Instance.new("UICorner", TitleBar).CornerRadius = UDim.new(0, 8)
+
+local TitleLabel = Instance.new("TextLabel", TitleBar)
+TitleLabel.Size = UDim2.new(1, -80, 1, 0)
+TitleLabel.Position = UDim2.new(0, 8, 0, 0)
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Text = "REHUB"
+TitleLabel.TextColor3 = Color3.fromRGB(0, 200, 255)
+TitleLabel.TextSize = 13
+TitleLabel.Font = Enum.Font.GothamBold
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.TextYAlignment = Enum.TextYAlignment.Center
+
+-- FPS Display
+local FpsLabel = Instance.new("TextLabel", TitleBar)
+FpsLabel.Size = UDim2.new(0, 50, 1, 0)
+FpsLabel.Position = UDim2.new(1, -100, 0, 0)
+FpsLabel.BackgroundTransparency = 1
+FpsLabel.Text = "FPS: --"
+FpsLabel.TextColor3 = Color3.fromRGB(200, 200, 220)
+FpsLabel.TextSize = 9
+FpsLabel.Font = Enum.Font.GothamBold
+FpsLabel.TextXAlignment = Enum.TextXAlignment.Right
+
+-- Close/Minimize Buttons
+local CloseBtn = Instance.new("TextButton", TitleBar)
+CloseBtn.Size = UDim2.new(0, 22, 0, 22)
+CloseBtn.Position = UDim2.new(1, -28, 0.5, -11)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 80)
+CloseBtn.Text = "✕"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseBtn.TextSize = 11
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.AutoButtonColor = false
+Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 4)
+
+local MinBtn = Instance.new("TextButton", TitleBar)
+MinBtn.Size = UDim2.new(0, 22, 0, 22)
+MinBtn.Position = UDim2.new(1, -56, 0.5, -11)
+MinBtn.BackgroundColor3 = Color3.fromRGB(70, 130, 200)
+MinBtn.Text = "−"
+MinBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+MinBtn.TextSize = 14
+MinBtn.Font = Enum.Font.GothamBold
+MinBtn.AutoButtonColor = false
+Instance.new("UICorner", MinBtn).CornerRadius = UDim.new(0, 4)
+
+-- Tab Bar
+local TabBar = Instance.new("Frame", Main)
+TabBar.Size = UDim2.new(1, 0, 0, 30)
+TabBar.Position = UDim2.new(0, 0, 0, 35)
+TabBar.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+TabBar.BorderSizePixel = 0
+
+local TabLayout = Instance.new("UIListLayout", TabBar)
+TabLayout.FillDirection = Enum.FillDirection.Horizontal
+TabLayout.Padding = UDim.new(0, 2)
+TabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+
+-- Content Container
+local ContentContainer = Instance.new("ScrollingFrame", Main)
+ContentContainer.Size = UDim2.new(1, -10, 1, -75)
+ContentContainer.Position = UDim2.new(0, 5, 0, 70)
+ContentContainer.BackgroundTransparency = 1
+ContentContainer.BorderSizePixel = 0
+ContentContainer.CanvasSize = UDim2.new(0, 0, 0, 0)
+ContentContainer.AutomaticCanvasSize = Enum.AutomaticSize.Y
+ContentContainer.ScrollBarThickness = 3
+ContentContainer.ScrollBarImageColor3 = Color3.fromRGB(0, 200, 255)
+
+-- Tabs
+local tabs = {}
+local currentTab = nil
+
+local function createTab(name)
+    local btn = Instance.new("TextButton", TabBar)
+    btn.Size = UDim2.new(0, 52, 1, 0)
+    btn.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+    btn.Text = name
+    btn.TextColor3 = Color3.fromRGB(180, 180, 200)
+    btn.TextSize = 9
+    btn.Font = Enum.Font.GothamBold
+    btn.AutoButtonColor = false
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
+    
+    local tabFrame = Instance.new("ScrollingFrame", ContentContainer)
+    tabFrame.Size = UDim2.new(1, -10, 1, -10)
+    tabFrame.Position = UDim2.new(0, 5, 0, 5)
+    tabFrame.BackgroundTransparency = 1
+    tabFrame.BorderSizePixel = 0
+    tabFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+    tabFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    tabFrame.ScrollBarThickness = 2
+    tabFrame.ScrollBarImageColor3 = Color3.fromRGB(0, 200, 255)
+    tabFrame.Visible = false
+    
+    local layout = Instance.new("UIListLayout", tabFrame)
+    layout.Padding = UDim.new(0, 4)
+    layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    
+    Instance.new("UIPadding", tabFrame).PaddingTop = UDim.new(0, 4)
+    
+    tabs[name] = {btn = btn, frame = tabFrame}
+    
+    btn.MouseButton1Click:Connect(function()
+        if currentTab then
+            tabs[currentTab].frame.Visible = false
+            tabs[currentTab].btn.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+            tabs[currentTab].btn.TextColor3 = Color3.fromRGB(180, 180, 200)
+        end
+        currentTab = name
+        tabFrame.Visible = true
+        btn.BackgroundColor3 = Color3.fromRGB(0, 200, 255)
+        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    end)
+    
+    return tabFrame
+end
+
+-- Helper function to create toggle switch
+local function createToggle(parent, label, defaultState, callback)
+    local row = Instance.new("Frame", parent)
+    row.Size = UDim2.new(1, -8, 0, 30)
+    row.BackgroundColor3 = Color3.fromRGB(25, 45, 45)
+    row.BorderSizePixel = 0
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
+    
+    local lbl = Instance.new("TextLabel", row)
+    lbl.Size = UDim2.new(0.65, 0, 1, 0)
+    lbl.Position = UDim2.new(0, 8, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = label
+    lbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+    lbl.TextSize = 10
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    
+    local track = Instance.new("TextButton", row)
+    track.Size = UDim2.new(0, 36, 0, 18)
+    track.Position = UDim2.new(1, -44, 0.5, -9)
+    track.BackgroundColor3 = defaultState and Color3.fromRGB(0, 200, 255) or Color3.fromRGB(70, 70, 70)
+    track.BorderSizePixel = 0
+    track.Text = ""
+    track.AutoButtonColor = false
+    Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
+    
+    local dot = Instance.new("Frame", track)
+    dot.Size = UDim2.new(0, 14, 0, 14)
+    dot.Position = defaultState and UDim2.new(1, -16, 0, 2) or UDim2.new(0, 2, 0, 2)
+    dot.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    dot.BorderSizePixel = 0
+    Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+    
+    local state = defaultState
+    
+    track.MouseButton1Click:Connect(function()
+        state = not state
+        track.BackgroundColor3 = state and Color3.fromRGB(0, 200, 255) or Color3.fromRGB(70, 70, 70)
+        dot.Position = state and UDim2.new(1, -16, 0, 2) or UDim2.new(0, 2, 0, 2)
+        if callback then callback(state) end
+    end)
+    
+    return { get = function() return state end, set = function(s) state = s; track.BackgroundColor3 = state and Color3.fromRGB(0, 200, 255) or Color3.fromRGB(70, 70, 70); dot.Position = state and UDim2.new(1, -16, 0, 2) or UDim2.new(0, 2, 0, 2) end, row = row }
+end
+
+local function createButton(parent, text, callback)
+    local btn = Instance.new("TextButton", parent)
+    btn.Size = UDim2.new(1, -8, 0, 28)
+    btn.BackgroundColor3 = Color3.fromRGB(0, 200, 255)
+    btn.Text = text
+    btn.TextColor3 = Color3.fromRGB(15, 15, 20)
+    btn.TextSize = 10
+    btn.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+    btn.MouseButton1Click:Connect(callback)
+    return btn
+end
+
+local function createHeader(parent, text)
+    local header = Instance.new("TextLabel", parent)
+    header.Size = UDim2.new(1, -8, 0, 16)
+    header.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+    header.Text = text
+    header.TextColor3 = Color3.fromRGB(0, 200, 255)
+    header.TextSize = 9
+    header.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", header).CornerRadius = UDim.new(0, 4)
+    return header
+end
+
+-- ============================================
+-- TAB 1: STEAL
+-- ============================================
+local stealTab = createTab("STEAL")
+
+local stealBtn = createButton(stealTab, "INSTANT STEAL", function()
+    local target = getClosestPlayer()
+    if target then executeStealSequence(target) end
+end)
+
+-- ============================================
+-- TAB 2: UTILS
+-- ============================================
+local utilsTab = createTab("UTILS")
+
+createHeader(utilsTab, "AUTO STEAL")
+local autoStealToggle = createToggle(utilsTab, "Auto Steal", false, function(on)
+    AUTO_STEAL_CONFIG.AUTO_STEAL_NEAREST_ENABLED = on
+    if on then startAutoSteal() else stopAutoSteal() end
+end)
+
+createHeader(utilsTab, "INVIS CLONE")
+local cloneBtn = createButton(utilsTab, "RUN INVIS CLONE", function()
+    task.spawn(RunInvisClone)
+end)
+
+createHeader(utilsTab, "MOVEMENT")
+local floatToggle = createToggle(utilsTab, "Float", false, function(on)
+    if on then if LocalPlayer.Character then enableFloat(LocalPlayer.Character) end else disableFloat() end
+end)
+local heightBypassToggle = createToggle(utilsTab, "Height Bypass", false, function(on)
+    if on then enableHeightBypass() else disableHeightBypass() end
+end)
+local tallModeToggle = createToggle(utilsTab, "Tall like zzzz", false, function(on)
+    if on then enableTallMode() else disableTallMode() end
+end)
+local grappleFlightToggle = createToggle(utilsTab, "Grapple Flight", false, function(on)
+    if on then enableGrappleFlight() else disableGrappleFlight() end
+end)
+local infiniteJumpToggle = createToggle(utilsTab, "Infinite Jump", false, function(on)
+    if on then enableInfiniteJump() else disableInfiniteJump() end
+end)
+local platformToggle = createToggle(utilsTab, "Platform", false, function(on)
+    if on then if LocalPlayer.Character then enablePlatform(LocalPlayer.Character) end else disablePlatform() end
+end)
+local helicopterToggle = createToggle(utilsTab, "Helicopter", false, function(on)
+    if on then if LocalPlayer.Character then enableHelicopter(LocalPlayer.Character) end else disableHelicopter() end
+end)
+local floatToPlotToggle = createToggle(utilsTab, "Float to Plot", false, function(on)
+    if on then enableFloatToPlot() else disableFloatToPlot() end
+end)
+local freezeToggle = createToggle(utilsTab, "Freeze", false, function(on)
+    if on then enableFreeze() else disableFreeze() end
+end)
+
+createHeader(utilsTab, "WORLD")
+local deleteBordersBtn = createButton(utilsTab, "DELETE BORDERS", deleteBorders)
+local barrierIncreaseBtn = createButton(utilsTab, "BARRIER INCREASE", barrierIncrease)
+
+createHeader(utilsTab, "SOCIAL")
+local friendsRow = Instance.new("Frame", utilsTab)
+friendsRow.Size = UDim2.new(1, -8, 0, 36)
+friendsRow.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+friendsRow.BorderSizePixel = 0
+Instance.new("UICorner", friendsRow).CornerRadius = UDim.new(0, 6)
+
+local friendsLabel = Instance.new("TextLabel", friendsRow)
+friendsLabel.Size = UDim2.new(0.7, 0, 1, 0)
+friendsLabel.Position = UDim2.new(0, 10, 0, 0)
+friendsLabel.BackgroundTransparency = 1
+friendsLabel.Text = "FRIENDS TOGGLE"
+friendsLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+friendsLabel.TextSize = 10
+friendsLabel.Font = Enum.Font.GothamBold
+friendsLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local friendsTrack = Instance.new("TextButton", friendsRow)
+friendsTrack.Size = UDim2.new(0, 36, 0, 18)
+friendsTrack.Position = UDim2.new(1, -44, 0.5, -9)
+friendsTrack.BackgroundColor3 = Color3.fromRGB(0, 200, 255)
+friendsTrack.BorderSizePixel = 0
+friendsTrack.Text = ""
+friendsTrack.AutoButtonColor = false
+Instance.new("UICorner", friendsTrack).CornerRadius = UDim.new(1, 0)
+
+local friendsDot = Instance.new("Frame", friendsTrack)
+friendsDot.Size = UDim2.new(0, 14, 0, 14)
+friendsDot.Position = UDim2.new(1, -16, 0, 2)
+friendsDot.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+friendsDot.BorderSizePixel = 0
+Instance.new("UICorner", friendsDot).CornerRadius = UDim.new(1, 0)
+
+friendsTrack.MouseButton1Click:Connect(function()
+    friendsAllowed = not friendsAllowed
+    if friendsAllowed then
+        friendsDot.Position = UDim2.new(1, -16, 0, 2)
+        friendsTrack.BackgroundColor3 = Color3.fromRGB(0, 200, 255)
+    else
+        friendsDot.Position = UDim2.new(0, 2, 0, 2)
+        friendsTrack.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+    end
+    ToggleFriends()
+end)
+
+-- ============================================
+-- TAB 3: PLAYERS
+-- ============================================
+local playersTab = createTab("PLAYERS")
+
+local playerScroll = Instance.new("ScrollingFrame", playersTab)
+playerScroll.Size = UDim2.new(1, -8, 1, -8)
+playerScroll.Position = UDim2.new(0, 4, 0, 4)
+playerScroll.BackgroundTransparency = 1
+playerScroll.BorderSizePixel = 0
+playerScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+playerScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+playerScroll.ScrollBarThickness = 3
+
+local playerLayout = Instance.new("UIListLayout", playerScroll)
+playerLayout.Padding = UDim.new(0, 4)
+
+local playerRows = {}
+
+local function addPlayerRow(p)
+    if p == LocalPlayer or playerRows[p.UserId] then return end
+    
+    local row = Instance.new("Frame", playerScroll)
+    row.Size = UDim2.new(1, -8, 0, 38)
+    row.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+    row.BorderSizePixel = 0
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
+    
+    local avatar = Instance.new("ImageLabel", row)
+    avatar.Size = UDim2.new(0, 26, 0, 26)
+    avatar.Position = UDim2.new(0, 6, 0, 6)
+    avatar.BackgroundTransparency = 1
+    avatar.Image = "rbxthumb://type=AvatarHeadShot&id=" .. p.UserId .. "&w=150&h=150"
+    Instance.new("UICorner", avatar).CornerRadius = UDim.new(1, 0)
+    
+    local nameLbl = Instance.new("TextLabel", row)
+    nameLbl.Size = UDim2.new(0.5, 0, 0, 16)
+    nameLbl.Position = UDim2.new(0, 40, 0, 11)
+    nameLbl.BackgroundTransparency = 1
+    nameLbl.Text = p.Name
+    nameLbl.TextColor3 = Color3.fromRGB(220, 220, 255)
+    nameLbl.TextSize = 9
+    nameLbl.Font = Enum.Font.GothamBold
+    nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+    
+    local stealFromBtn = Instance.new("TextButton", row)
+    stealFromBtn.Size = UDim2.new(0, 45, 0, 22)
+    stealFromBtn.Position = UDim2.new(1, -53, 0.5, -11)
+    stealFromBtn.BackgroundColor3 = Color3.fromRGB(0, 200, 255)
+    stealFromBtn.Text = "STEAL"
+    stealFromBtn.TextColor3 = Color3.fromRGB(15, 15, 20)
+    stealFromBtn.TextSize = 8
+    stealFromBtn.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", stealFromBtn).CornerRadius = UDim.new(0, 4)
+    
+    stealFromBtn.MouseButton1Click:Connect(function()
+        executeStealSequence(p)
+    end)
+    
+    playerRows[p.UserId] = row
+end
+
+local function removePlayerRow(p)
+    if playerRows[p.UserId] then
+        playerRows[p.UserId]:Destroy()
+        playerRows[p.UserId] = nil
+    end
+end
+
+for _, p in ipairs(Players:GetPlayers()) do addPlayerRow(p) end
+Players.PlayerAdded:Connect(addPlayerRow)
+Players.PlayerRemoving:Connect(removePlayerRow)
+
+-- ============================================
+-- TAB 4: LEAVE (COM TOGGLE DO INSTANT LEAVE)
+-- ============================================
+local leaveTab = createTab("LEAVE")
+
+createHeader(leaveTab, "INSTANT LEAVE")
+
+-- Toggle do Instant Leave
+local leaveToggle = createToggle(leaveTab, "Instant Leave", false, function(on)
+    leaveEnabled = on
+    if on then
+        createFloatingLeaveButton()
+        print("[REHUB] ✅ Instant Leave ENABLED - Botão flutuante apareceu!")
+    else
+        removeFloatingLeaveButton()
+        print("[REHUB] ❌ Instant Leave DISABLED")
+    end
+end)
+
+-- Botão de sair imediato (dentro do menu também)
+local leaveNowBtn = createButton(leaveTab, "LEAVE NOW", function()
+    doInstantLeave()
+end)
+
+-- ============================================
+-- FPS COUNTER
+-- ============================================
+local fpsTimer = 0
+local frameCount = 0
+RunService.RenderStepped:Connect(function(dt)
+    frameCount = frameCount + 1
+    fpsTimer = fpsTimer + dt
+    if fpsTimer >= 0.5 then
+        local fps = math.floor(frameCount / fpsTimer)
+        FpsLabel.Text = "FPS: " .. fps
+        fpsTimer = 0
+        frameCount = 0
+    end
+end)
+
+-- ============================================
+-- MINIMIZE / CLOSE
+-- ============================================
+local minimized = false
+MinBtn.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    ContentContainer.Visible = not minimized
+    TabBar.Visible = not minimized
+    Main.Size = minimized and UDim2.new(0, 280, 0, 35) or UDim2.new(0, 280, 0, 380)
+    MinBtn.Text = minimized and "+" or "−"
+end)
+
+CloseBtn.MouseButton1Click:Connect(function()
+    stopAutoSteal()
+    if leaveEnabled then removeFloatingLeaveButton() end
+    disableFloat()
+    disableHeightBypass()
+    disableTallMode()
+    disableGrappleFlight()
+    disableInfiniteJump()
+    disablePlatform()
+    disableHelicopter()
+    disableFloatToPlot()
+    disableFreeze()
+    ScreenGui.Enabled = false
+end)
+
+-- ============================================
+-- DRAGGING
+-- ============================================
+local dragging, dragStart, startPos
+TitleBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = true
+        dragStart = input.Position
+        startPos = Main.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+        local delta = input.Position - dragStart
+        Main.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + delta.X,
+            startPos.Y.Scale, startPos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+-- ============================================
+-- KEYBINDS
+-- ============================================
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    
+    if input.KeyCode == Enum.KeyCode.E then
+        local target = getClosestPlayer()
+        if target then executeStealSequence(target) end
+    end
+    
+    if input.KeyCode == Enum.KeyCode.T then
+        if leaveEnabled then
+            doInstantLeave()
+        end
+    end
+    
+    if input.KeyCode == Enum.KeyCode.C then
+        task.spawn(RunInvisClone)
+    end
+end)
+
+-- ============================================
+-- CHARACTER RESPAWN HANDLING
+-- ============================================
+LocalPlayer.CharacterAdded:Connect(function(newCharacter)
+    task.wait(0.5)
+    if floatToggle.get() then enableFloat(newCharacter) end
+    if platformToggle.get() then enablePlatform(newCharacter) end
+    if helicopterToggle.get() then enableHelicopter(newCharacter) end
+    if grappleFlightToggle.get() then enableGrappleFlight() end
+    if infiniteJumpToggle.get() then enableInfiniteJump() end
+    if autoStealToggle.get() then startAutoSteal() end
+end)
+
+-- ============================================
+-- SELECT FIRST TAB
+-- ============================================
+local firstTab = next(tabs)
+if firstTab then
+    tabs[firstTab].btn.MouseButton1Click:Fire()
+end
+
+print("==========================================")
+print("REHUB - ALL FEATURES")
+print("TABS: STEAL | UTILS | PLAYERS | LEAVE")
+print("")
+print("✅ INSTANT LEAVE:")
+print("  - Ative o toggle na aba LEAVE")
+print("  - Um botão vermelho vai aparecer na tela")
+print("  - Clique no botão ou pressione T para sair")
+print("==========================================")
